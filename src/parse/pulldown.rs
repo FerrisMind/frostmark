@@ -173,8 +173,8 @@ fn block_extent_for_tag(events: &[Event<'static>], tag: &Tag<'_>) -> usize {
     let mut depth = 0usize;
     for (i, event) in events.iter().enumerate() {
         match event {
-            Event::Start(t) if t == tag => depth += 1,
-            Event::End(t) if *t == end_tag => {
+            Event::Start(t) if same_container_start(t, tag) => depth += 1,
+            Event::End(t) if same_container_end(*t, end_tag) => {
                 depth -= 1;
                 if depth == 0 {
                     return i + 1;
@@ -184,6 +184,20 @@ fn block_extent_for_tag(events: &[Event<'static>], tag: &Tag<'_>) -> usize {
         }
     }
     events.len()
+}
+
+fn same_container_start(candidate: &Tag<'_>, expected: &Tag<'_>) -> bool {
+    match (candidate, expected) {
+        (Tag::List(_), Tag::List(_)) => true,
+        _ => candidate == expected,
+    }
+}
+
+fn same_container_end(candidate: TagEnd, expected: TagEnd) -> bool {
+    match (candidate, expected) {
+        (TagEnd::List(_), TagEnd::List(_)) => true,
+        _ => candidate == expected,
+    }
 }
 
 fn paragraph_extent(events: &[Event<'static>]) -> usize {
@@ -281,6 +295,24 @@ mod tests {
             .expect("paragraph");
         assert_eq!(paragraph.source.trim_end(), "Hello **world**.");
         assert_ne!(paragraph.source.as_ref(), source);
+    }
+
+    #[test]
+    fn ordered_list_extent_includes_nested_list_with_different_start() {
+        let source = "1. outer\n   3. nested\n2. after\n\ntrailing\n";
+        let parser = Parser::new_ext(source, pulldown_cmark::Options::all());
+        let events: Vec<_> = parser.map(|event| event.into_static()).collect();
+        let Event::Start(tag) = &events[0] else {
+            panic!("expected list start, got {:?}", events.first());
+        };
+        assert!(matches!(tag, Tag::List(Some(1))));
+        let extent = block_extent_for_tag(&events, tag);
+        assert!(extent > 0);
+        assert!(matches!(events[extent - 1], Event::End(TagEnd::List(_))));
+        assert!(matches!(
+            events.get(extent),
+            Some(Event::Start(Tag::Paragraph))
+        ));
     }
 
     #[test]

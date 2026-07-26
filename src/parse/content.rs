@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "math")]
 use pulldown_cmark::TagEnd;
-use pulldown_cmark::{CodeBlockKind, Event, Tag};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag};
 
 use crate::core::block::{BlockContent, CompiledMarkdown};
 use crate::html::sanitize;
@@ -126,7 +126,29 @@ pub fn block_content_from_events(
     {
         return sanitize::block_content_from_raw_html(&html, raw_html, gfm_tagfilter);
     }
-    BlockContent::Markdown(CompiledMarkdown::new(source, slice.to_vec()))
+    let events = match raw_html {
+        RawHtmlPolicy::Preserve => slice.to_vec(),
+        RawHtmlPolicy::Escape => slice
+            .iter()
+            .map(|event| match event {
+                Event::Html(text) | Event::InlineHtml(text) => Event::Text(text.clone()),
+                other => other.clone(),
+            })
+            .collect(),
+        RawHtmlPolicy::StripUnsupported => slice
+            .iter()
+            .map(|event| match event {
+                Event::Html(text) => sanitize::sanitize_inline_html_source(text)
+                    .map(|safe| Event::Html(CowStr::Boxed(safe.into_boxed_str())))
+                    .unwrap_or_else(|| Event::Text(text.clone())),
+                Event::InlineHtml(text) => sanitize::sanitize_inline_html_source(text)
+                    .map(|safe| Event::InlineHtml(CowStr::Boxed(safe.into_boxed_str())))
+                    .unwrap_or_else(|| Event::Text(text.clone())),
+                other => other.clone(),
+            })
+            .collect(),
+    };
+    BlockContent::Markdown(CompiledMarkdown::new(source, events))
 }
 
 /// True when the slice is a raw HTML block, not Markdown with embedded inline HTML.
@@ -327,5 +349,71 @@ mod tests {
             true,
         );
         assert!(matches!(content, BlockContent::Html(_)));
+    }
+
+    #[test]
+    fn escape_policy_converts_inline_html_events_to_text() {
+        let source = "text <script>alert(1)</script>";
+        let events: Vec<_> = Parser::new_ext(source, Options::empty())
+            .map(|e| e.into_static())
+            .collect();
+        let BlockContent::Markdown(compiled) = block_content_from_events(
+            &events,
+            Arc::from(source),
+            crate::options::RawHtmlPolicy::Escape,
+            false,
+        ) else {
+            panic!("expected markdown block");
+        };
+        let mut html = String::new();
+        pulldown_cmark::html::push_html(&mut html, compiled.events().iter().cloned());
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "inline HTML was not escaped: {html}"
+        );
+        assert!(!html.contains("<script>"), "live script survived: {html}");
+    }
+
+    #[test]
+    fn strip_policy_removes_dangerous_inline_attributes() {
+        let source = "text <a href=\"javascript:alert(1)\" onclick=\"alert(2)\">x</a>";
+        let events: Vec<_> = Parser::new_ext(source, Options::empty())
+            .map(|e| e.into_static())
+            .collect();
+        let BlockContent::Markdown(compiled) = block_content_from_events(
+            &events,
+            Arc::from(source),
+            crate::options::RawHtmlPolicy::StripUnsupported,
+            false,
+        ) else {
+            panic!("expected markdown block");
+        };
+        let mut html = String::new();
+        pulldown_cmark::html::push_html(&mut html, compiled.events().iter().cloned());
+        assert!(
+            !html.contains("javascript:"),
+            "javascript URL survived: {html}"
+        );
+        assert!(!html.contains("onclick="), "event handler survived: {html}");
+    }
+
+    #[cfg(feature = "static")]
+    #[test]
+    fn strip_policy_preserves_inline_tag_shape() {
+        let source = "text <a href=\"javascript:alert(1)\">x</a>";
+        let events: Vec<_> = Parser::new_ext(source, Options::empty())
+            .map(|e| e.into_static())
+            .collect();
+        let BlockContent::Markdown(compiled) = block_content_from_events(
+            &events,
+            Arc::from(source),
+            crate::options::RawHtmlPolicy::StripUnsupported,
+            false,
+        ) else {
+            panic!("expected markdown block");
+        };
+        let mut html = String::new();
+        pulldown_cmark::html::push_html(&mut html, compiled.events().iter().cloned());
+        assert_eq!(html, "<p>text <a>x</a></p>\n");
     }
 }
