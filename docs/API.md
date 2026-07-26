@@ -157,7 +157,7 @@ Raw HTML in Markdown is parsed into owned `HtmlFragment` trees via html5ever Tre
 #[cfg(feature = "static")]
 use strimd::HtmlFragment;
 
-let fragment = HtmlFragment::from_html("<details><summary>x</summary></details>")?;
+let fragment = HtmlFragment::from_html("<details><summary>x</summary></details>");
 ```
 
 Supported tags and sanitization policy are enforced in the iced renderer and `RawHtmlPolicy` (see `ParseOptions`).
@@ -187,4 +187,4 @@ Functions return `Result` instead of panicking on malformed input.
 - [MIGRATION.md](MIGRATION.md) — stack migration guide
 - [README_HEADLESS.md](README_HEADLESS.md) — headless quick start (included in crate docs for `no_iced` builds)
 - [LEGACY_REMOVAL_GATE.md](LEGACY_REMOVAL_GATE.md) — comrak/RcDom removal criteria
-- [CRATE_SPLIT_SPIKE.md](CRATE_SPLIT_SPIKE.md) — single-crate vs split evaluation_REMOVAL_GATE.md](LEGACY
+- [CRATE_SPLIT_SPIKE.md](CRATE_SPLIT_SPIKE.md) — single-crate vs split evaluation

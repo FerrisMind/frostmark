@@ -63,7 +63,7 @@ where
                             .into_iter()
                             .map(|cell| TableCell {
                                 content: self.render_children(cell, data),
-                                width: cell_width(cell),
+                                width: cell_width(cell, self.text_size),
                             })
                             .collect(),
                     );
@@ -105,7 +105,7 @@ where
             .iter()
             .map(|cell| TableCell {
                 content: self.render_children(*cell, data.insert(ChildDataFlags::BOLD)),
-                width: cell_width(*cell),
+                width: cell_width(*cell, self.text_size),
             })
             .collect();
     }
@@ -159,11 +159,11 @@ fn cell_alignment(cell: DomRef<'_>) -> Option<ChildAlignment> {
     align
 }
 
-fn cell_width(cell: DomRef<'_>) -> Option<f32> {
+fn cell_width(cell: DomRef<'_>, font_size: f32) -> Option<f32> {
     cell.get_attr("width")
         .and_then(|n| n.parse::<f32>().ok())
         .or_else(|| {
             cell.get_attr("style")
-                .and_then(|s| super::css_dimension(s, "width"))
+                .and_then(|s| super::css_dimension_with_font(s, "width", font_size))
         })
 }

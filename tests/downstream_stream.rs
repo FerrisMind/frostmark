@@ -24,6 +24,19 @@ fn stream_patches_update_incrementally() {
 }
 
 #[test]
+fn public_finalize_commits_pending_block() {
+    let mut doc = StreamDocument::new(StreamOptions::chat());
+    doc.append("A final paragraph without a trailing newline");
+    assert!(doc.pending().is_some());
+
+    let update = doc.finalize();
+
+    assert!(matches!(update.patch, StreamPatch::AppendCommitted { .. }));
+    assert_eq!(doc.blocks().count(), 1);
+    assert!(doc.pending().is_none());
+}
+
+#[test]
 fn chunked_stream_matches_whole_document_block_count() {
     let source = include_str!("fixtures/stream_table.md");
     let whole = {

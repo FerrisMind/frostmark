@@ -119,16 +119,12 @@ async fn stream_api(
     }
 
     let mut byte_stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
 
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(pos) = buffer.find('\n') {
-            let line: String = buffer.drain(..=pos).collect();
-            let line = line.trim_end_matches('\n').trim();
-            if let Some(delta) = parse_sse_delta(line)
+        for line in decode_sse_lines(&mut buffer, &chunk)? {
+            if let Some(delta) = parse_sse_delta(&line)
                 && output
                     .send(ChatStreamEvent::Delta {
                         msg_id,
@@ -139,6 +135,22 @@ async fn stream_api(
             {
                 return Ok(());
             }
+        }
+    }
+
+    if !buffer.is_empty() {
+        let line = String::from_utf8(buffer)
+            .map_err(|error| format!("invalid UTF-8 in SSE stream: {error}"))?;
+        if let Some(delta) = parse_sse_delta(line.trim())
+            && output
+                .send(ChatStreamEvent::Delta {
+                    msg_id,
+                    chunk: delta,
+                })
+                .await
+                .is_err()
+        {
+            return Ok(());
         }
     }
 
@@ -176,6 +188,42 @@ fn parse_sse_delta(line: &str) -> Option<String> {
         .first()
         .and_then(|c| c.delta.content.clone())
         .filter(|s| !s.is_empty())
+}
+
+fn decode_sse_lines(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<String>, String> {
+    buffer.extend_from_slice(chunk);
+    let mut lines = Vec::new();
+
+    while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
+        let line = buffer.drain(..=position).collect::<Vec<_>>();
+        let line = String::from_utf8(line)
+            .map_err(|error| format!("invalid UTF-8 in SSE stream: {error}"))?;
+        lines.push(line.trim_end_matches('\n').trim().to_owned());
+    }
+
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_decoder_preserves_utf8_split_across_chunks() {
+        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"Привет\"}}]}\n";
+        let split = line.find('П').expect("Cyrillic payload") + 1;
+        let mut buffer = Vec::new();
+
+        assert!(
+            decode_sse_lines(&mut buffer, &line.as_bytes()[..split])
+                .expect("first chunk")
+                .is_empty()
+        );
+        let lines = decode_sse_lines(&mut buffer, &line.as_bytes()[split..]).expect("second chunk");
+
+        assert_eq!(lines, vec![line.trim_end_matches('\n').to_owned()]);
+        assert_eq!(parse_sse_delta(&lines[0]).as_deref(), Some("Привет"));
+    }
 }
 
 /// Word/whitespace chunks that preserve newlines (needed for GFM tables in TEST.md).

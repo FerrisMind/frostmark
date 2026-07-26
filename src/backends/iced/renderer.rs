@@ -732,8 +732,7 @@ where
             .or_else(|| {
                 node.get_attr("style")
                     .as_ref()
-                    .and_then(|s| css_dimension(s, "width"))
-                    .map(|v| em_to_pixels(v, base_size))
+                    .and_then(|s| css_dimension_with_font(s, "width", base_size))
             });
         let mut height = node
             .get_attr("height")
@@ -741,8 +740,7 @@ where
             .or_else(|| {
                 node.get_attr("style")
                     .as_ref()
-                    .and_then(|s| css_dimension(s, "height"))
-                    .map(|v| em_to_pixels(v, base_size))
+                    .and_then(|s| css_dimension_with_font(s, "height", base_size))
             });
         if is_badge && width.is_none() && height.is_none() {
             height = Some(20.0);
@@ -816,15 +814,11 @@ where
             link(
                 children.render(),
                 "",
-                Some(&Self::e).filter(|_| false),
+                None::<&fn(String) -> M>,
                 self.fn_style_link_button.clone(),
             )
             .into()
         }
-    }
-
-    fn e(_: String) -> M {
-        panic!()
     }
 
     pub(crate) fn render_children(
@@ -1667,28 +1661,41 @@ fn text_size_for_data(text_size: f32, heading_scale: f32, heading_weight: u16) -
     text_size * (1.0 + ((scaling - 1.0) * heading_scale))
 }
 
-fn css_dimension(style: &str, name: &str) -> Option<f32> {
-    let lower = style.to_ascii_lowercase();
-    let needle = format!("{name}:");
-    let start = lower.find(&needle)?;
-    let rest = style.get(start + needle.len()..)?;
-    let value = rest.split(';').next()?.trim();
-    parse_css_length(value)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CssLength {
+    Pixels(f32),
+    Em(f32),
+    Number(f32),
 }
 
-fn parse_css_length(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if let Some(em) = value.strip_suffix("em") {
-        em.trim().parse().ok()
-    } else if let Some(px) = value.strip_suffix("px") {
-        px.trim().parse().ok()
-    } else {
-        value.parse().ok()
+fn css_dimension_with_font(style: &str, name: &str, font_size: f32) -> Option<f32> {
+    style.split(';').find_map(|declaration| {
+        let (property, value) = declaration.split_once(':')?;
+        if !property.trim().eq_ignore_ascii_case(name) {
+            return None;
+        }
+        Some(parse_css_length(value.trim())?.to_pixels(font_size))
+    })
+}
+
+impl CssLength {
+    fn to_pixels(self, font_size: f32) -> f32 {
+        match self {
+            Self::Pixels(value) | Self::Number(value) => value,
+            Self::Em(value) => value * font_size,
+        }
     }
 }
 
-fn em_to_pixels(em: f32, text_size: f32) -> f32 {
-    em * text_size
+fn parse_css_length(value: &str) -> Option<CssLength> {
+    let value = value.trim();
+    if let Some(em) = value.strip_suffix("em") {
+        Some(CssLength::Em(em.trim().parse().ok()?))
+    } else if let Some(px) = value.strip_suffix("px") {
+        Some(CssLength::Pixels(px.trim().parse().ok()?))
+    } else {
+        Some(CssLength::Number(value.parse().ok()?))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2010,6 +2017,24 @@ mod render_tests {
             Some(GitHubAlertKind::Warning)
         );
         assert_eq!(github_alert_kind(Some("blockquote")), None);
+    }
+
+    #[test]
+    fn css_lengths_keep_pixel_and_em_units() {
+        assert_eq!(parse_css_length("100px"), Some(CssLength::Pixels(100.0)));
+        assert_eq!(parse_css_length("2em"), Some(CssLength::Em(2.0)));
+        assert_eq!(
+            css_dimension_with_font("width: 100px", "width", 20.0),
+            Some(100.0)
+        );
+        assert_eq!(
+            css_dimension_with_font("width: 2em", "width", 20.0),
+            Some(40.0)
+        );
+        assert_eq!(
+            css_dimension_with_font("min-width: 100px; width: 2em", "width", 20.0),
+            Some(40.0)
+        );
     }
 
     #[test]

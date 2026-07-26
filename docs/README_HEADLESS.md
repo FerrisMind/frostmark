@@ -5,21 +5,27 @@ Headless builds use `default-features = false` with `no_iced` plus `static` and/
 ## Static preview and HTML export
 
 ```rust,no_run
+#[cfg(feature = "static")]
+{
 use strimd::{Document, ParseProfile};
 
 let doc = Document::parse("# Title\n\nBody.", ParseProfile::GitHubPreview).unwrap();
 let html = doc.to_html().unwrap();
 let _ = html;
+}
 ```
 
 ## LLM streaming
 
 ```rust,no_run
+#[cfg(feature = "stream")]
+{
 use strimd::{StreamDocument, StreamOptions};
 
 let mut doc = StreamDocument::new(StreamOptions::chat());
 doc.append("Hello ");
 doc.append("**world**.\n\n");
+}
 ```
 
 ## Supported public features
