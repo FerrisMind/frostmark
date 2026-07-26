@@ -147,7 +147,7 @@ impl HtmlFragment {
         Some(fragment)
     }
 
-    /// Unwrap synthetic html5ever fragment wrappers (`html`, `body`, context `div`).
+    /// Unwrap synthetic html5ever document wrappers (`html`, `body`).
     pub(crate) fn normalize_roots(mut self) -> Self {
         loop {
             if self.roots.len() != 1 {
@@ -163,14 +163,6 @@ impl HtmlFragment {
                         self.roots = vec![children[0]];
                         continue;
                     }
-                    self.roots = children;
-                    break;
-                }
-                "div" if children.len() == 1 => {
-                    self.roots = vec![children[0]];
-                    continue;
-                }
-                "div" if children.len() > 1 => {
                     self.roots = children;
                     break;
                 }
@@ -203,6 +195,19 @@ mod tests {
         let root = fragment.push_element(HtmlTag::new("p"), Vec::new(), vec![text]);
         fragment.push_root(root);
         assert_eq!(fragment.roots().len(), 1);
+    }
+
+    #[cfg(feature = "static")]
+    #[test]
+    fn user_root_div_is_not_unwrapped() {
+        let fragment = HtmlFragment::from_html("<div class=\"content\">body</div>");
+        let root = fragment.roots().first().copied().expect("root");
+        assert!(matches!(
+            fragment.node(root),
+            Some(HtmlNode::Element { tag, attrs, .. })
+                if tag.as_str() == "div"
+                    && attrs.iter().any(|attr| attr.name.as_ref() == "class")
+        ));
     }
 
     #[cfg(feature = "static")]

@@ -12,14 +12,15 @@ pub fn blocks_to_html(blocks: &[RenderBlock]) -> Result<String, RenderError> {
                 html::push_html(&mut out, compiled.events().iter().cloned());
             }
             BlockContent::Html(fragment) => {
-                for root in fragment.roots() {
-                    write_fragment_node(&mut out, fragment, *root)?;
-                }
+                let serialized = crate::html::sanitize::serialize_fragment(fragment)
+                    .map_err(RenderError::new)?;
+                out.push_str(&serialized);
             }
             BlockContent::Code { lang, complete: _ } => {
                 let lang_attr = lang
                     .as_deref()
-                    .map(|l| format!(" class=\"language-{l}\""))
+                    .and_then(|l| l.split_whitespace().next())
+                    .map(|l| format!(" class=\"language-{}\"", html_escape_text(l)))
                     .unwrap_or_default();
                 out.push_str(&format!(
                     "<pre><code{lang_attr}>{}</code></pre>",
@@ -53,50 +54,6 @@ pub fn blocks_to_html(blocks: &[RenderBlock]) -> Result<String, RenderError> {
     Ok(out)
 }
 
-fn write_fragment_node(
-    out: &mut String,
-    fragment: &crate::html::fragment::HtmlFragment,
-    id: crate::html::fragment::NodeId,
-) -> Result<(), RenderError> {
-    use crate::html::fragment::HtmlNode;
-    let Some(node) = fragment.node(id) else {
-        return Err(RenderError::new(format!(
-            "missing HtmlFragment node {id:?}"
-        )));
-    };
-    match node {
-        HtmlNode::Text(text) => out.push_str(text),
-        HtmlNode::Comment(comment) => {
-            out.push_str("<!--");
-            out.push_str(comment);
-            out.push_str("-->");
-        }
-        HtmlNode::Element {
-            tag,
-            attrs,
-            children,
-        } => {
-            out.push('<');
-            out.push_str(tag.as_str());
-            for attr in attrs {
-                out.push(' ');
-                out.push_str(&attr.name);
-                out.push_str("=\"");
-                out.push_str(&html_escape_text(&attr.value));
-                out.push('"');
-            }
-            out.push('>');
-            for child in children {
-                write_fragment_node(out, fragment, *child)?;
-            }
-            out.push_str("</");
-            out.push_str(tag.as_str());
-            out.push('>');
-        }
-    }
-    Ok(())
-}
-
 fn html_escape_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -109,4 +66,67 @@ fn html_escape_text(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::block::{BlockKind, BlockStatus, RenderBlock};
+    use crate::core::ids::BlockId;
+    use crate::html::fragment::HtmlFragment;
+
+    fn block(source: &str, content: BlockContent) -> RenderBlock {
+        RenderBlock {
+            id: BlockId::new(1),
+            status: BlockStatus::Committed,
+            kind: BlockKind::HtmlBlock,
+            source: Arc::from(source),
+            content,
+        }
+    }
+
+    #[test]
+    fn escapes_fragment_text_and_does_not_close_void_elements() {
+        let fragment = HtmlFragment::from_html("<pre><code>&lt;b&gt;</code></pre><br>");
+        let html = blocks_to_html(&[block("source", BlockContent::Html(fragment))]).expect("html");
+        assert!(html.contains("&lt;b>"), "text was not escaped: {html}");
+        assert!(html.contains("<br>"), "void element missing: {html}");
+        assert!(!html.contains("</br>"), "void element was closed: {html}");
+    }
+
+    #[test]
+    fn preserves_raw_text_element_contents() {
+        let fragment = HtmlFragment::from_html(
+            "<div><script>if (a < b) { console.log(\"& value\"); }</script><style>.x > .y { color: red; }</style></div>",
+        );
+        let html = blocks_to_html(&[block("source", BlockContent::Html(fragment))]).expect("html");
+        assert!(
+            html.contains("if (a < b) { console.log(\"& value\"); }"),
+            "html: {html}"
+        );
+        assert!(html.contains(".x > .y { color: red; }"), "html: {html}");
+    }
+
+    #[test]
+    fn code_language_is_tokenized_and_attribute_escaped() {
+        let html = blocks_to_html(&[block(
+            "source",
+            BlockContent::Code {
+                lang: Some("rust\" onerror=\"alert(1)\" extra".into()),
+                complete: true,
+            },
+        )])
+        .expect("html");
+        assert!(
+            html.contains("class=\"language-rust&quot;"),
+            "language attr: {html}"
+        );
+        assert!(!html.contains("onerror=\""), "attribute injection: {html}");
+        assert!(
+            !html.contains(" extra"),
+            "language info string was not tokenized: {html}"
+        );
+    }
 }
