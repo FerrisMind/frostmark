@@ -69,6 +69,7 @@ pub struct StreamDocument {
     pending: Option<RenderBlock>,
     profile: ParseProfile,
     raw_html: crate::options::RawHtmlPolicy,
+    pending_policy: PendingPolicy,
     next_id: u64,
 }
 
@@ -88,6 +89,7 @@ impl StreamDocument {
             pending: None,
             profile: options.profile,
             raw_html: parse_options.raw_html,
+            pending_policy: options.pending_policy,
             next_id: 1,
         }
     }
@@ -98,9 +100,15 @@ impl StreamDocument {
         self.apply_mdstream_update(update)
     }
 
-    /// Finalize the stream (flush pending) and return the resulting patch.
+    /// Append a streamed chunk and return the resulting patch.
     pub fn append_str(&mut self, chunk: &str) -> StreamUpdate {
         self.append(chunk)
+    }
+
+    /// Finalize the stream, committing its last pending block.
+    pub fn finalize(&mut self) -> StreamUpdate {
+        let update = self.stream.finalize();
+        self.apply_mdstream_update(update)
     }
 
     /// Reset internal stream state.
@@ -144,11 +152,7 @@ impl StreamDocument {
             self.blocks.clear();
             self.block_index.clear();
             self.pending = None;
-            return StreamUpdate {
-                patch: StreamPatch::ClearAndRebuild,
-                invalidated: Vec::new(),
-                reset: true,
-            };
+            self.next_id = 1;
         }
 
         self.adapter.apply_update(&update);
@@ -207,7 +211,9 @@ impl StreamDocument {
             )
         });
 
-        let patch = if !appended.is_empty() {
+        let patch = if update.reset {
+            StreamPatch::ClearAndRebuild
+        } else if !appended.is_empty() {
             StreamPatch::AppendCommitted { blocks: appended }
         } else if pending_changed {
             StreamPatch::ReplacePending
@@ -220,7 +226,7 @@ impl StreamDocument {
         StreamUpdate {
             patch,
             invalidated,
-            reset: false,
+            reset: update.reset,
         }
     }
 
@@ -231,7 +237,13 @@ impl StreamDocument {
     ) -> RenderBlock {
         let id = BlockId::new(block.id.0);
         self.next_id = self.next_id.max(block.id.0 + 1);
-        let source_text = block.display_or_raw();
+        let source_text = if status == BlockStatus::Pending
+            && matches!(self.pending_policy, PendingPolicy::RawOnly)
+        {
+            &block.raw
+        } else {
+            block.display_or_raw()
+        };
         let source = Arc::<str>::from(source_text);
         let kind = mdstream_kind_to_strimd(block.kind);
         let gfm_tagfilter = self.profile.uses_gfm_extensions();
@@ -260,7 +272,7 @@ impl StreamDocument {
                 .is_some_and(crate::parse::content::is_mermaid_lang)
             {
                 BlockContent::Mermaid {
-                    source: Arc::from(code_text_from_stream_block(block)),
+                    source: Arc::from(code_text_from_stream_source(source.as_ref())),
                     complete: status == BlockStatus::Committed,
                 }
             } else {
@@ -274,6 +286,9 @@ impl StreamDocument {
                 lang,
                 complete: status == BlockStatus::Committed,
             }
+        } else if status == BlockStatus::Pending {
+            let events = self.adapter.parse_pending(block);
+            self.committed_content(source.clone(), events, kind, gfm_tagfilter)
         } else {
             BlockContent::PendingMarkdown
         };
@@ -303,8 +318,8 @@ impl StreamDocument {
 }
 
 #[cfg(feature = "mermaid")]
-fn code_text_from_stream_block(block: &mdstream::Block) -> String {
-    block.display_or_raw().trim_end_matches('\n').to_string()
+fn code_text_from_stream_source(source: &str) -> String {
+    source.trim_end_matches('\n').to_string()
 }
 
 fn mdstream_kind_to_strimd(kind: mdstream::BlockKind) -> BlockKind {
@@ -386,5 +401,75 @@ mod tests {
             std::mem::discriminant(&whole),
             std::mem::discriminant(&chunked)
         );
+    }
+
+    #[test]
+    fn finalize_commits_the_last_pending_block() {
+        let mut doc = StreamDocument::new(StreamOptions::chat());
+        doc.append("unfinished **bold");
+        assert!(doc.blocks().next().is_none());
+        assert!(doc.pending().is_some());
+
+        let update = doc.finalize();
+
+        assert!(matches!(update.patch, StreamPatch::AppendCommitted { .. }));
+        assert_eq!(doc.blocks().count(), 1);
+        assert!(doc.pending().is_none());
+    }
+
+    #[test]
+    fn reset_update_keeps_the_rebuild_payload() {
+        let mut options = StreamOptions::chat();
+        options.mdstream.footnotes = FootnotesMode::SingleBlock;
+        let mut doc = StreamDocument::new(options);
+
+        doc.append("Earlier paragraph.\n\n");
+        let update = doc.append("A footnote[^1].\n\n[^1]: note\n");
+
+        assert!(update.reset);
+        assert!(doc.blocks().next().is_none());
+        let pending = doc.pending().expect("reset update must expose payload");
+        assert!(pending.source.contains("Earlier paragraph."));
+        assert!(pending.source.contains("[^1]: note"));
+    }
+
+    #[test]
+    fn raw_only_pending_source_does_not_use_terminated_display() {
+        let mut options = StreamOptions::chat();
+        options.pending_policy = PendingPolicy::RawOnly;
+        let mut doc = StreamDocument::new(options);
+
+        doc.append("Hello\n\n**bold");
+
+        let pending = doc.pending().expect("pending block");
+        assert_eq!(pending.source.as_ref(), "**bold");
+    }
+
+    #[test]
+    fn pending_markdown_uses_the_adapter_parser() {
+        let mut doc = StreamDocument::new(StreamOptions::chat());
+
+        doc.append("Hello\n\n**bold");
+
+        let pending = doc.pending().expect("pending block");
+        assert!(matches!(pending.content, BlockContent::Markdown(_)));
+    }
+
+    #[test]
+    fn raw_only_pending_parser_does_not_terminate_unclosed_markup() {
+        let mut options = StreamOptions::chat();
+        options.pending_policy = PendingPolicy::RawOnly;
+        let mut doc = StreamDocument::new(options);
+
+        doc.append("Hello\n\n**bold");
+
+        let pending = doc.pending().expect("pending block");
+        let BlockContent::Markdown(compiled) = &pending.content else {
+            panic!("expected parsed pending markdown");
+        };
+        assert!(!compiled.events().iter().any(|event| matches!(
+            event,
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strong)
+        )));
     }
 }

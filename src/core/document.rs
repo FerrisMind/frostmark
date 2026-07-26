@@ -10,6 +10,8 @@ use crate::profile::ParseProfile;
 pub struct Document {
     blocks: Vec<RenderBlock>,
     profile: ParseProfile,
+    #[cfg(feature = "static")]
+    gfm_tagfilter: bool,
     diagnostics: ParseDiagnostics,
 }
 
@@ -29,6 +31,8 @@ impl Document {
         Ok(Self {
             blocks,
             profile,
+            #[cfg(feature = "static")]
+            gfm_tagfilter: options.gfm_tagfilter,
             diagnostics: ParseDiagnostics::pulldown(),
         })
     }
@@ -61,7 +65,7 @@ impl Document {
     #[cfg(feature = "static")]
     pub fn to_html(&self) -> Result<String, crate::core::error::RenderError> {
         let html = crate::html::writer::blocks_to_html(&self.blocks)?;
-        Ok(if self.profile.uses_gfm_extensions() {
+        Ok(if self.gfm_tagfilter {
             crate::html::tagfilter::apply_gfm_tagfilter(&html)
         } else {
             html
@@ -169,6 +173,22 @@ App {
         let html = doc.to_html().expect("html");
         assert!(!html.contains("<script"));
         assert!(html.contains("&lt;script>") || html.contains("unsupported"));
+    }
+
+    #[cfg(feature = "static")]
+    #[test]
+    fn explicit_gfm_tagfilter_setting_is_preserved_for_export() {
+        let mut options = ParseOptions::for_profile(ParseProfile::GitHubPreview);
+        options.gfm_tagfilter = false;
+        let doc =
+            Document::parse_with_options("<xmp>raw</xmp>", ParseProfile::GitHubPreview, &options)
+                .expect("parse");
+        let html = doc.to_html().expect("html");
+
+        assert!(
+            html.contains("<xmp>raw</xmp>"),
+            "tagfilter unexpectedly applied: {html}"
+        );
     }
 
     #[cfg(feature = "static")]
